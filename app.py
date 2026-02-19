@@ -2,419 +2,984 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_curve, auc, confusion_matrix
 
-# Import business logic from source.py
-from source import *
+# NOTE: This lab intentionally keeps "business logic" in source.py
+# (data generation, evaluation, stability simulation, etc.)
+from source import (
+    generate_synthetic_credit_data,
+    train_primary_model_black_box,
+    create_challenger_model,
+    evaluate_model_performance,
+    compute_spearman_rank_correlation,
+    define_risk_tiers,
+    run_stability_test,
+)
 
-st.set_page_config(page_title="QuLab: Lab 38: Model Validation Exercise", layout="wide")
+# -----------------------------
+# Page setup
+# -----------------------------
+st.set_page_config(
+    page_title="QuLab: Lab 38: Model Validation Exercise", layout="wide")
 st.sidebar.image("https://www.quantuniversity.com/assets/img/logo5.jpg")
 st.sidebar.divider()
+
 st.title("QuLab: Lab 38: Model Validation Exercise")
+st.caption("Audience: CFA charterholders, portfolio managers, risk analysts • Goal: decision-useful model validation, not coding.")
 st.divider()
 
-# --- Helper Function (Assumed globally needed for visualizations) ---
-def define_risk_tiers(probs, thresholds=[0.05, 0.15, 0.30]):
-    """Maps continuous probabilities to discrete risk buckets."""
-    return np.digitize(probs, thresholds)
+# -----------------------------
+# Session state
+# -----------------------------
 
-# --- Session State Initialization ---
-if 'setup_complete' not in st.session_state:
-    st.session_state.setup_complete = False
-    st.session_state.current_page = "Setup & Data Initialization"
 
-    # Data and Models
-    st.session_state.X_train = None
-    st.session_state.y_train = None
-    st.session_state.X_test = None
-    st.session_state.y_test = None
-    st.session_state.mock_black_box_model = None
-    st.session_state.primary_probs = None
-    st.session_state.model_documentation = None
-    st.session_state.business_context = None
-    st.session_state.challenger_model = None
-    st.session_state.challenger_scaler = None
+def _init_state():
+    defaults = {
+        "setup_complete": False,
+        "nav": "Setup & Validation Package",
+        "X_train": None,
+        "y_train": None,
+        "X_test": None,
+        "y_test": None,
+        "primary_model": None,
+        "challenger_model": None,
+        "primary_probs": None,
+        "challenger_probs": None,
+        "doc_issues": [],
+        "repro_results": None,
+        "benchmark_results": None,
+        "stability_results": None,
+        "complexity_assessment": None,
+        "validation_report": None,
+        # Policy settings (lab defaults; users can change)
+        "policy_profile": "Standard (Lab)",
+        # classification cutoff used for F1 etc. (explicitly shown)
+        "policy_threshold": 0.50,
+        "policy_auc_tol_close": 0.01,    # reproduction tolerance: close
+        "policy_auc_tol_fail": 0.03,     # reproduction tolerance: fail
+        "policy_f1_tol_close": 0.01,
+        "policy_f1_tol_fail": 0.03,
+        "policy_min_auc_lift": 0.02,     # complexity justification
+        "policy_min_rank_corr": 0.70,
+        "policy_min_tier_agree": 0.80,
+        "policy_max_flip_rate": 0.05,
+        "tier_thresholds": [0.05, 0.15, 0.30],  # risk tier boundaries
+        "portfolio_size_mm": 500,        # business materiality example
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-    # Results
-    st.session_state.doc_issues = []
-    st.session_state.reproduced_metrics = {}
-    st.session_state.repro_pass = False
-    st.session_state.benchmark_results = {}
-    st.session_state.stability_df = pd.DataFrame()
-    st.session_state.cx_score = 0
-    st.session_state.cx_rec = "Not Assessed"
-    st.session_state.cx_findings = []
-    st.session_state.final_validation_report = {}
 
-# --- Sidebar Navigation ---
-pages = [
-    "Setup & Data Initialization",
-    "1. Documentation Review",
-    "2. Result Reproduction",
-    "3. Challenger Benchmarking",
-    "4. Prediction Stability Testing",
-    "5. Complexity Justification",
-    "6. Formal Validation Report",
-    "Visualizations"
+_init_state()
+
+# -----------------------------
+# Sidebar: Navigation + Policy
+# -----------------------------
+PAGES = [
+    "Setup & Validation Package",
+    "1) Documentation Review (Gate 1)",
+    "2) Result Reproduction (Gate 2)",
+    "3) Challenger Benchmarking",
+    "4) Prediction Stability Testing",
+    "5) Complexity Justification",
+    "6) Formal Validation Report",
+    "Visualizations",
 ]
 
-st.session_state.current_page = st.sidebar.selectbox("Navigate Validation Steps", pages, index=pages.index(st.session_state.get('current_page', pages[0])))
+st.sidebar.subheader("Navigate")
+st.session_state.nav = st.sidebar.radio(
+    "Section", PAGES, index=PAGES.index(st.session_state.nav))
 
-# --- Page: Setup & Data Initialization ---
-if st.session_state.current_page == "Setup & Data Initialization":
-    st.header("1. Setup: Environment Configuration and Data Preparation")
-    st.markdown(f"**Challenger Benchmarks, Reproduction, and 'Effective Challenge'**")
-    st.markdown(f"As a CFA Charterholder and a seasoned professional in **Model Risk Management (MRM)** at **Prudent Financial Corp.**, your core responsibility is to safeguard the institution against financial and reputational damage stemming from flawed or poorly understood machine learning models. Regulatory mandates like SR 11-7 demand an \"effective challenge\" process for all models, ensuring independent review by qualified personnel who can critically assess a model's design, data, and outputs. Today, your team is tasked with validating a critical \"black-box\" credit default prediction model, referred to as the \"Primary Model,\" developed by an internal data science unit. This model, potentially an advanced ensemble like XGBoost, predicts the probability of loan default within 12 months for underwriting decisions. You have been provided with the model's predictions on a test dataset, its high-level documentation, and access to the raw input data. Crucially, you do **not** have access to the model's internal weights or full source code, which necessitates a robust independent validation approach. Your goal is to perform a six-step independent validation workflow to determine if the Primary Model is fit for purpose, robust, and compliant. This involves:")
-    st.markdown(f"1.  **Documentation Review:** Systematically checking the provided model documentation for completeness and identifying \"red flags.\"")
-    st.markdown(f"2.  **Reproducing Claimed Performance:** Independently calculating key performance metrics and comparing them against the developer's claims.")
-    st.markdown(f"3.  **Benchmarking with a Challenger Model:** Building a simpler, interpretable model (Logistic Regression) to assess if the Primary Model's complexity is justified.")
-    st.markdown(f"4.  **Prediction Stability Testing:** Evaluating the model's sensitivity to small input perturbations.")
-    st.markdown(f"5.  **Complexity Justification Assessment:** Combining performance, stability, and business context to justify the Primary Model's complexity.")
-    st.markdown(f"6.  **Formal Validation Report:** Compiling a comprehensive report with findings, severity ratings, and a clear recommendation.")
-    st.markdown(f"This exercise is not about rebuilding the model; it's about providing an \"effective challenge\" – finding reasons why it *should not* be approved if it fails to meet stringent validation standards.")
-    st.markdown(f"---")
-    st.markdown(f"Before diving into the validation workflow, we'll set up our Python environment by installing necessary libraries, importing dependencies, and simulating the required input data and model components. Since we're treating the Primary Model as a black box, we will simulate its `predict_proba` method using a pre-trained XGBoost model for the purpose of stability testing, but its internal weights will not be \"visible\" to the validator.")
-    st.subheader("1.1 Import Required Dependencies")
-    st.markdown(f"The necessary libraries have been imported from `source.py`.")
-    st.subheader("1.2 Simulate Model Data and Black-Box Predictions")
-    st.markdown(f"As an MRM analyst, obtaining consistent, clean data and the black-box model's test predictions is the first practical step. We'll simulate a credit dataset with features like 'fico_score', 'dti', 'income', etc., and a binary target 'default'. To truly challenge the black-box model, we also need access to the features it was trained on and a ground truth target variable for independent performance evaluation. Our synthetic data will reflect a common scenario in credit risk: a class imbalance where defaults are rare.")
-    st.markdown(f"For the \"black-box\" model, we'll create a simple `XGBClassifier` and train it. This model will represent the developer's complex model whose internal workings are opaque, but its `predict_proba` method is available for querying (e.g., via an API or a function call). The initial `primary_probs` will be the developer's claimed predictions on `X_test`.")
+with st.sidebar.expander("Validation policy settings (lab)", expanded=False):
+    st.markdown(
+        """
+These settings exist to prevent “numbers without governance.”  
+In real institutions, they come from your **MRM policy** (tolerance, materiality, cutoffs).
+        """.strip()
+    )
 
-    if st.button("Initialize Data and Models", disabled=st.session_state.setup_complete):
-        st.session_state.X_train = X_train
-        st.session_state.y_train = y_train
-        st.session_state.X_test = X_test
-        st.session_state.y_test = y_test
-        st.session_state.mock_black_box_model = mock_black_box_model
-        st.session_state.primary_probs = primary_probs
-        st.session_state.model_documentation = model_documentation
-        st.session_state.business_context = business_context
+    profile = st.selectbox(
+        "Policy profile",
+        ["Conservative", "Standard (Lab)", "Aggressive"],
+        index=["Conservative", "Standard (Lab)", "Aggressive"].index(
+            st.session_state.policy_profile),
+        help="Pre-fills tolerances and cutoffs. You can still override anything below."
+    )
+    st.session_state.policy_profile = profile
+
+    if profile == "Conservative":
+        st.session_state.policy_auc_tol_close = 0.005
+        st.session_state.policy_auc_tol_fail = 0.015
+        st.session_state.policy_f1_tol_close = 0.005
+        st.session_state.policy_f1_tol_fail = 0.015
+        st.session_state.policy_min_auc_lift = 0.03
+        st.session_state.policy_min_rank_corr = 0.80
+        st.session_state.policy_min_tier_agree = 0.90
+        st.session_state.policy_max_flip_rate = 0.03
+    elif profile == "Aggressive":
+        st.session_state.policy_auc_tol_close = 0.02
+        st.session_state.policy_auc_tol_fail = 0.05
+        st.session_state.policy_f1_tol_close = 0.02
+        st.session_state.policy_f1_tol_fail = 0.05
+        st.session_state.policy_min_auc_lift = 0.01
+        st.session_state.policy_min_rank_corr = 0.60
+        st.session_state.policy_min_tier_agree = 0.70
+        st.session_state.policy_max_flip_rate = 0.08
+    else:
+        # Standard (Lab)
+        st.session_state.policy_auc_tol_close = 0.01
+        st.session_state.policy_auc_tol_fail = 0.03
+        st.session_state.policy_f1_tol_close = 0.01
+        st.session_state.policy_f1_tol_fail = 0.03
+        st.session_state.policy_min_auc_lift = 0.02
+        st.session_state.policy_min_rank_corr = 0.70
+        st.session_state.policy_min_tier_agree = 0.80
+        st.session_state.policy_max_flip_rate = 0.05
+
+    st.markdown("**Operational cutoffs used in this lab**")
+    st.session_state.policy_threshold = st.slider(
+        "Decision cutoff (used for F1 / confusion matrices)",
+        min_value=0.05, max_value=0.95, value=float(st.session_state.policy_threshold), step=0.01,
+        help="Credit decisions rarely use 0.50 by default. Choose a cutoff that matches an underwriting rule (e.g., PD>8% decline)."
+    )
+    st.session_state.portfolio_size_mm = st.number_input(
+        "Portfolio size (USD mm) for materiality lens",
+        min_value=10, max_value=5000, value=int(st.session_state.portfolio_size_mm), step=10,
+        help="Used for the 'business impact' criterion in complexity justification."
+    )
+
+    st.markdown("**Reproduction tolerances**")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.session_state.policy_auc_tol_close = st.number_input("AUC: close tolerance", value=float(
+            st.session_state.policy_auc_tol_close), step=0.001, format="%.3f")
+        st.session_state.policy_f1_tol_close = st.number_input("F1: close tolerance", value=float(
+            st.session_state.policy_f1_tol_close), step=0.001, format="%.3f")
+    with c2:
+        st.session_state.policy_auc_tol_fail = st.number_input("AUC: fail tolerance", value=float(
+            st.session_state.policy_auc_tol_fail), step=0.001, format="%.3f")
+        st.session_state.policy_f1_tol_fail = st.number_input("F1: fail tolerance", value=float(
+            st.session_state.policy_f1_tol_fail), step=0.001, format="%.3f")
+
+    st.markdown("**Complexity justification cutoffs**")
+    c3, c4 = st.columns(2)
+    with c3:
+        st.session_state.policy_min_auc_lift = st.number_input("Minimum AUC lift required", value=float(
+            st.session_state.policy_min_auc_lift), step=0.005, format="%.3f")
+        st.session_state.policy_min_rank_corr = st.number_input("Minimum rank correlation (ρ)", value=float(
+            st.session_state.policy_min_rank_corr), step=0.05, format="%.2f")
+    with c4:
+        st.session_state.policy_min_tier_agree = st.number_input("Minimum tier agreement", value=float(
+            st.session_state.policy_min_tier_agree), step=0.05, format="%.2f")
+        st.session_state.policy_max_flip_rate = st.number_input("Maximum flip rate allowed", value=float(
+            st.session_state.policy_max_flip_rate), step=0.01, format="%.2f")
+
+    st.markdown("**Risk tier thresholds**")
+    st.session_state.tier_thresholds = st.text_input(
+        "Tier boundaries (comma-separated PD thresholds)",
+        value=",".join([str(x) for x in st.session_state.tier_thresholds]),
+        help="Defines Tier 0/1/2/3 segmentation. These are policy choices; label tiers with actions in the report."
+    )
+    try:
+        st.session_state.tier_thresholds = [float(
+            x.strip()) for x in st.session_state.tier_thresholds.split(",") if x.strip() != ""]
+    except Exception:
+        st.warning(
+            "Could not parse tier thresholds. Using previous valid values.")
+
+st.sidebar.divider()
+
+# -----------------------------
+# Shared helpers (pedagogical)
+# -----------------------------
+SEVERITY = {
+    "Training period does not include recessionary stress scenarios.": "Critical",
+    "Limited testing on minority demographic subgroups.": "Critical",
+    "No explicit model explainability strategy documented.": "Material",
+    "Feature engineering steps lack clear governance approvals.": "Material",
+}
+
+
+def severity_badge(level: str) -> str:
+    if level == "Fatal":
+        return "🛑 Fatal"
+    if level == "Critical":
+        return "🔴 Critical"
+    if level == "Material":
+        return "🟠 Material"
+    return "🟡 Minor"
+
+
+def gate_banner(ok: bool, pass_text: str, fail_text: str):
+    if ok:
+        st.success(pass_text)
+    else:
+        st.error(fail_text)
+
+
+def checkpoint(question: str, options: list, correct: str, explanation: str):
+    st.markdown("#### Checkpoint (1 minute)")
+    ans = st.radio(question, options, index=None, horizontal=False)
+    if ans is None:
+        st.info("Answer to unlock the explanation.")
+        return
+    if ans == correct:
+        st.success(f"Correct — {explanation}")
+    else:
+        st.warning(f"Not quite — {explanation}")
+
+
+# -----------------------------
+# Setup & Validation Package
+# -----------------------------
+if st.session_state.nav == "Setup & Validation Package":
+    st.header("Setup: What the Validator Receives (Data, Scores, Documentation)")
+    st.markdown(
+        """
+**Learning goal:** treat validation as a governance workflow: you validate a **model package** (data + score file + documentation), not “cool algorithms.”  
+
+**What this lab simulates:**  
+- A credit default prediction setting with rare defaults (class imbalance).  
+- A “primary” model that you treat as black-box (you validate outputs, not internals).  
+- A simpler “challenger” benchmark used for effective challenge.
+        """.strip()
+    )
+
+    with st.expander("Assumptions & limits (read before running)", expanded=False):
+        st.info(
+            """
+- Data are **synthetic**. In production, you must validate representativeness, missingness, and drift vs. your portfolio.
+- The “black-box” stance in this lab means: you focus on **scores + documentation**, not the training pipeline.
+- All numeric cutoffs come from the sidebar **policy settings** (lab defaults).
+            """.strip()
+        )
+
+    if st.button("Load validation package (data + scores + documentation)"):
+        X_train, y_train, X_test, y_test = generate_synthetic_credit_data()
+        primary_model, primary_probs = train_primary_model_black_box(
+            X_train, y_train, X_test)
+        challenger_model, challenger_probs = create_challenger_model(
+            X_train, y_train, X_test)
+
+        st.session_state.X_train, st.session_state.y_train = X_train, y_train
+        st.session_state.X_test, st.session_state.y_test = X_test, y_test
+        st.session_state.primary_model, st.session_state.primary_probs = primary_model, primary_probs
+        st.session_state.challenger_model, st.session_state.challenger_probs = challenger_model, challenger_probs
         st.session_state.setup_complete = True
-        st.success("Data and Models Initialized!")
-        st.write(f"Dataset shape: {st.session_state.X_test.shape}")
-        st.write(f"Default rate in test set: {st.session_state.y_test.mean():.2%}")
-        st.rerun()
 
     if st.session_state.setup_complete:
-        st.success("Data and Models are already initialized!")
-        st.write(f"Dataset shape: {st.session_state.X_test.shape}")
-        st.write(f"Default rate in test set: {st.session_state.y_test.mean():.2%}")
+        st.subheader("Package summary")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Train rows", st.session_state.X_train.shape[0])
+        with c2:
+            st.metric("Test rows", st.session_state.X_test.shape[0])
+        with c3:
+            st.metric("Test default rate",
+                      f"{float(np.mean(st.session_state.y_test))*100:.2f}%")
 
-# --- Page: 1. Documentation Review ---
-elif st.session_state.current_page == "1. Documentation Review":
-    st.header("2. Step 1: Documentation Review - Uncovering Red Flags")
-    st.markdown(f"As an MRM analyst, the first line of defense against model risk is a thorough review of the model documentation. Before running a single line of code, you must ensure the model's purpose, data, features, methodology, and known limitations are clearly and completely documented. Missing information or documented \"red flags\" (e.g., training data not covering recent economic downturns, unusually low default rates indicating potential data issues, or an excessive number of undocumented features) can lead to immediate validation failure or critical conditions for approval, as per SR 11-7 guidelines. This step saves time by flagging fundamental issues early.")
+        st.caption(
+            "Decision translation: Low default rate means accuracy is not informative — focus on ranking, cutoffs, and cost asymmetry."
+        )
 
-    if st.session_state.setup_complete:
-        st.subheader("Model Documentation Provided:")
-        st.json(st.session_state.model_documentation)
-
-        if st.button("Perform Documentation Review"):
-            st.session_state.doc_issues = review_documentation(st.session_state.model_documentation)
-
-        if st.session_state.doc_issues:
-            st.warning("Issues Found in Documentation:")
-            st.subheader("Documentation Review Summary:")
-            st.markdown(f"The `review_documentation` function systematically checked the provided `model_documentation` against a set of best practices and identified specific \"red flags.\" In this case, we found:")
-            for issue in st.session_state.doc_issues:
-                st.markdown(f"* {issue}")
-            st.markdown(f"These findings are critical for the MRM team. While not immediately leading to rejection, they indicate areas requiring further developer attention and may result in \"Conditional Approve\" status with specific remediation requirements, ensuring the model is robust under various economic conditions.")
-        elif st.session_state.doc_issues == [] and st.button("Perform Documentation Review", key="check_hidden"):
-             st.success("Documentation review passed. No critical red flags found.")
+        checkpoint(
+            "If the package is incomplete (missing score file or documentation), what should a validator do?",
+            ["Proceed using best effort", "Stop and request missing artifacts",
+                "Only check AUC and move on"],
+            "Stop and request missing artifacts",
+            "Validation starts with package integrity. You cannot defend decisions without the artifacts that produced them."
+        )
     else:
-        st.warning("Please complete 'Setup & Data Initialization' first.")
+        st.warning("Load the validation package to begin.")
 
-# --- Page: 2. Result Reproduction ---
-elif st.session_state.current_page == "2. Result Reproduction":
-    st.header("3. Step 2: Reproducing Claimed Performance - Verifying Developer's Claims")
-    st.markdown(f"After reviewing documentation, your next crucial task is to independently reproduce the model's claimed performance metrics using the provided test data and the black-box model's predictions. This step is fundamental to \"effective challenge\" because any significant discrepancy between claimed and independently reproduced metrics immediately invalidates the model for deployment. It could signal data leakage, incorrect metric calculation, or an improper test set split by the developer, all of which are serious governance issues.")
-    st.markdown(f"We will calculate the Area Under the Receiver Operating Characteristic Curve (AUC) and the F1-score for the positive (default) class:")
-    st.markdown(r"$$ \text{F1-score} = 2 \times \frac{\text{Precision} \times \text{Recall}}{\text{Precision} + \text{Recall}} $$")
-    st.markdown(r"where:")
-    st.markdown(r"$$ \text{Precision} = \frac{\text{True Positives}}{\text{True Positives} + \text{False Positives}} $$")
-    st.markdown(r"$$ \text{Recall} = \frac{\text{True Positives}}{\text{True Positives} + \text{False Negatives}} $$")
-    st.markdown(f"The AUC measures the overall ability of the model to distinguish between classes, while the F1-score, especially for the positive class (default), balances precision and recall, which is vital in imbalanced datasets like credit default where identifying actual defaults is paramount.")
+# -----------------------------
+# 1) Documentation Review (Gate 1)
+# -----------------------------
+elif st.session_state.nav == "1) Documentation Review (Gate 1)":
+    st.header("1) Documentation Review (Gate 1): Is the model package approve-able?")
+    st.markdown(
+        """
+**Learning goal:** documentation is a control — it determines whether the model can be governed, audited, and defended.  
+A validator asks: **Is the model sufficiently documented to be used in a regulated decision?** before asking “Is it accurate?”
+        """.strip()
+    )
 
-    if st.session_state.setup_complete:
-        st.subheader("Developer's Claimed Performance:")
-        st.json(st.session_state.model_documentation['claimed_performance'])
-
-        if st.button("Reproduce Claimed Metrics"):
-            reproduced_metrics, repro_pass = reproduce_results(st.session_state.y_test, st.session_state.primary_probs, st.session_state.model_documentation['claimed_performance'])
-            st.session_state.reproduced_metrics = reproduced_metrics
-            st.session_state.repro_pass = repro_pass
-
-        if st.session_state.reproduced_metrics:
-            st.subheader("Result Reproduction Summary:")
-            st.table(pd.DataFrame(st.session_state.reproduced_metrics))
-            if not st.session_state.repro_pass:
-                st.error("FLAG: Significant discrepancy between claimed and reproduced metrics.")
-                st.markdown(f"**Practitioner Warning:** If you cannot reproduce the developer's claimed metrics, the model fails validation immediately. Common causes: data version mismatch, incorrect metric implementation, or silent data filtering.")
-            else:
-                st.success("PASS: Claimed metrics successfully reproduced within tolerance.")
-            st.markdown(f"The `reproduce_results` function compares the developer's `claimed_performance` metrics (AUC, F1-score) against those independently calculated by the MRM team using the provided `y_test` and `primary_probs`. In this simulated scenario, our reproduction shows that the metrics are reproduced within acceptable tolerance ('YES' or 'CLOSE'), indicating that the developer's claims are largely valid regarding the model's reported performance on the given test set. Had there been a 'NO' match, the validation process would halt immediately, requiring the development team to explain the discrepancies before proceeding. This step is a critical gatekeeper in the validation workflow.")
+    if not st.session_state.setup_complete:
+        st.warning("Run setup first.")
     else:
-        st.warning("Please complete 'Setup & Data Initialization' first.")
+        # Simulated model documentation package
+        with st.expander("Model card (simulated validation package)", expanded=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(
+                    "**Purpose**: Predict probability of credit default for retail applicants.")
+                st.markdown("**Target**: 12-month default event (binary).")
+                st.markdown(
+                    "**Training period**: 2012–2019 (no recessionary stress window).")
+            with c2:
+                st.markdown(
+                    f"**Training sample size**: {st.session_state.X_train.shape[0]:,}")
+                st.markdown(
+                    f"**Observed default rate (train)**: {float(np.mean(st.session_state.y_train))*100:.2f}%")
+                st.markdown(
+                    "**Deployment use**: underwriting + pricing tiering.")
 
-# --- Page: 3. Challenger Benchmarking ---
-elif st.session_state.current_page == "3. Challenger Benchmarking":
-    st.header("4. Step 3: Challenger Model Benchmarking - Seeking Simplicity and Interpretability")
-    st.markdown(f"A key component of \"effective challenge\" is to benchmark the complex black-box model against a simpler, more interpretable \"challenger\" model. As an MRM analyst, you need to answer: \"Is the complex model's added opacity justified by its incremental performance gains over a simpler alternative?\" If a Logistic Regression, for example, performs nearly as well as an XGBoost, the increased model risk and reduced interpretability of the black-box model might not be warranted.")
-    st.markdown(f"We will train a Logistic Regression model on the same `X_train` and `y_train` data, scale the features using `StandardScaler`, and then compare its performance against the Primary Model using:")
-    st.markdown(f"*   **AUC Lift ($\Delta AUC$)**: The difference in AUC values.")
-    st.markdown(r"$$ \Delta AUC = AUC_{\text{primary}} - AUC_{\text{challenger}} $$")
-    st.markdown(f"where $AUC_{{primary}}$ is the Area Under the Curve for the primary model and $AUC_{{challenger}}$ is for the challenger model.")
-    st.markdown(f"*   **Spearman's Rank Correlation Coefficient ($\rho$)**: Measures the monotonic relationship between the predicted probabilities of the two models. A high rank correlation ($\rho > 0.70$) indicates that both models generally agree on the relative ordering of risk, even if absolute probabilities differ.")
-    st.markdown(r"$$ \rho = 1 - \frac{6 \sum d_i^2}{n(n^2 - 1)} $$")
-    st.markdown(r"where $d_i$ is the difference in ranks between the two models for each observation, and $n$ is the number of observations.")
-    st.markdown(f"*   **Risk Tier Agreement**: Categorizing predictions into discrete risk buckets (e.g., low, medium, high) and measuring the percentage of observations where both models assign the same risk tier. This is vital for business decisions, as different tiers often trigger different actions.")
+            st.markdown("**Known limitations (as disclosed)**")
+            st.markdown(
+                "- Training period does not include recessionary stress scenarios.")
+            st.markdown("- Limited testing on minority demographic subgroups.")
+            st.markdown(
+                "- No explicit model explainability strategy documented.")
+            st.markdown(
+                "- Feature engineering steps lack clear governance approvals.")
 
-    st.subheader("Challenger Model Configuration (Demonstration)")
-    st.info("Due to strict constraints on using `source.py` functions directly without modification, the following parameters are for demonstration only. The underlying `challenger_benchmark` function uses its own hardcoded defaults as defined in `source.py`.")
-    st.slider("Logistic Regression C (Regularization Strength)", 0.01, 1.0, 0.1, 0.01, key="lr_c")
-    st.slider("Risk Tier Threshold 1 (e.g., Low-Medium)", 0.01, 0.10, 0.05, 0.01, key="tier1")
-    st.slider("Risk Tier Threshold 2 (e.g., Medium-High)", 0.10, 0.20, 0.15, 0.01, key="tier2")
-    st.slider("Risk Tier Threshold 3 (e.g., High-Very High)", 0.20, 0.40, 0.30, 0.01, key="tier3")
+        st.markdown("### Findings (with severity)")
+        issues = [
+            "Training period does not include recessionary stress scenarios.",
+            "Limited testing on minority demographic subgroups.",
+            "No explicit model explainability strategy documented.",
+            "Feature engineering steps lack clear governance approvals.",
+        ]
+        st.session_state.doc_issues = issues
 
-    if st.session_state.setup_complete and st.session_state.reproduced_metrics:
-        if st.button("Run Challenger Benchmarking"):
-            benchmark_results = challenger_benchmark(st.session_state.X_train, st.session_state.y_train, st.session_state.X_test, st.session_state.y_test, st.session_state.primary_probs, st.session_state.reproduced_metrics['auc']['reproduced_value'])
-            st.session_state.benchmark_results = benchmark_results
-            st.session_state.challenger_model = benchmark_results['challenger_model']
-            
-            # Fit scaler for later visualization use
-            scaler_for_challenger = StandardScaler()
-            scaler_for_challenger.fit(st.session_state.X_train)
-            st.session_state.challenger_scaler = scaler_for_challenger
+        # Show as a table for audit-readiness
+        df_issues = pd.DataFrame({
+            "Issue": issues,
+            "Severity": [severity_badge(SEVERITY.get(i, "Minor")) for i in issues],
+            "Why this matters (decision relevance)": [
+                "Downturn behavior drives PD calibration + capital planning risk.",
+                "Incomplete fair lending evidence can block approval or require conditions.",
+                "You may not be able to justify outcomes or support adverse action explanations.",
+                "Weak governance evidence increases model risk and audit exposure.",
+            ],
+            "Evidence to clear": [
+                "Add stress-period data or demonstrate robust stress performance.",
+                "Subgroup performance + disparate impact review (policy-aligned).",
+                "Provide explainability plan: what, when, and how it is governed.",
+                "Provide approvals, lineage, and change control artifacts.",
+            ]
+        })
+        st.dataframe(df_issues, use_container_width=True)
 
-        if st.session_state.benchmark_results:
-            st.subheader("Challenger Benchmarking Results:")
+        gate_banner(
+            ok=True,
+            pass_text="Gate 1 completed: Documentation reviewed and issues categorized.",
+            fail_text="Gate 1 not completed."
+        )
+
+        checkpoint(
+            "A strong AUC can compensate for missing documentation in a regulated underwriting model.",
+            ["True", "False"],
+            "False",
+            "Documentation is a governance requirement. Without it, you cannot defend decisions, monitor risk, or satisfy audit requirements."
+        )
+
+# -----------------------------
+# 2) Result Reproduction (Gate 2)
+# -----------------------------
+elif st.session_state.nav == "2) Result Reproduction (Gate 2)":
+    st.header("2) Result Reproduction (Gate 2): Do we trust the reported results?")
+    st.markdown(
+        """
+**Learning goal:** reproduction tests **package integrity** (same data, same scores, same metric definitions).  
+If reproduction fails, do **not** proceed to deeper analysis — reconcile versions first.
+        """.strip()
+    )
+
+    if not st.session_state.setup_complete:
+        st.warning("Run setup first.")
+    else:
+        with st.expander("Why the cutoff matters (plain English)", expanded=False):
+            st.info(
+                f"""
+This lab computes F1 using a **decision cutoff** of **{st.session_state.policy_threshold:.2f}** (from sidebar).  
+In credit, that cutoff should represent an underwriting rule (e.g., “PD > 8% ⇒ decline” or “PD > 5% ⇒ manual review”).
+                """.strip()
+            )
+
+        st.markdown("We will calculate the Area Under the Receiver Operating Characteristic Curve (AUC) and the F1-score for the positive (default) class:")
+        # --- DO NOT REMOVE: formulae from original markdown blocks ---
+        st.markdown(
+            r"""
+$$
+\text{F1-score} = 2 \times \frac{\text{Precision} \times \text{Recall}}{\text{Precision} + \text{Recall}}
+$$
+""")
+        st.markdown(r"where:")
+        st.markdown(
+            r"""
+$$
+\text{Precision} = \frac{\text{True Positives}}{\text{True Positives} + \text{False Positives}}
+$$
+""")
+        st.markdown(
+            r"""
+$$
+\text{Recall} = \frac{\text{True Positives}}{\text{True Positives} + \text{False Negatives}}
+$$
+""")
+        # --- end preserved formula blocks ---
+
+        st.markdown("### Reproduce developer-claimed metrics")
+        st.caption(
+            "Decision translation: A reproduction failure is a versioning / integrity problem, not a 'model performance' debate.")
+
+        # Simulated dev-claimed results (as in original concept)
+        claimed_auc = 0.82
+        claimed_f1 = 0.45
+
+        if st.button("Run reproduction check"):
+            auc_val, f1_val = evaluate_model_performance(
+                st.session_state.y_test,
+                st.session_state.primary_probs,
+                threshold=st.session_state.policy_threshold
+            )
+
+            # Apply tolerance policy (close / fail)
+            def _status(claim, actual, tol_close, tol_fail):
+                diff = abs(claim - actual)
+                if diff <= tol_close:
+                    return "PASS"
+                if diff <= tol_fail:
+                    return "CLOSE (investigate rounding / dataset version)"
+                return "FAIL (stop — reconcile artifacts)"
+
+            auc_status = _status(
+                claimed_auc, auc_val, st.session_state.policy_auc_tol_close, st.session_state.policy_auc_tol_fail)
+            f1_status = _status(
+                claimed_f1, f1_val, st.session_state.policy_f1_tol_close, st.session_state.policy_f1_tol_fail)
+
+            repro = pd.DataFrame({
+                "Metric": ["AUC", "F1"],
+                "Claimed": [claimed_auc, claimed_f1],
+                "Reproduced": [float(auc_val), float(f1_val)],
+                "Abs Diff": [abs(claimed_auc - auc_val), abs(claimed_f1 - f1_val)],
+                "Status (policy-based)": [auc_status, f1_status],
+            })
+            st.session_state.repro_results = repro
+
+        if st.session_state.repro_results is not None:
+            st.dataframe(st.session_state.repro_results,
+                         use_container_width=True)
+
+            any_fail = any(
+                "FAIL" in s for s in st.session_state.repro_results["Status (policy-based)"].tolist())
+            gate_banner(
+                ok=not any_fail,
+                pass_text="Gate 2 PASS: results reproduced within policy tolerance. You may proceed.",
+                fail_text="Gate 2 FAIL: stop here. Request dataset/score version reconciliation before proceeding."
+            )
+
+            checkpoint(
+                "If reproduction fails, what's the best next step?",
+                ["Tighten the threshold until it matches", "Proceed to challenger benchmarking anyway",
+                    "Reconcile versions of data, labels, and score file"],
+                "Reconcile versions of data, labels, and score file",
+                "Reproduction failures are usually definition/version mismatches (split, labels, score precision) and must be fixed before interpretation."
+            )
+
+# -----------------------------
+# 3) Challenger Benchmarking
+# -----------------------------
+elif st.session_state.nav == "3) Challenger Benchmarking":
+    st.header(
+        "3) Challenger Benchmarking: Does the black box add value vs a simpler model?")
+    st.markdown(
+        """
+**Learning goal:** complexity must earn its governance burden.  
+You benchmark the primary model against a simpler challenger on the **same test set** and interpret the results operationally (ranking + tiers).
+        """.strip()
+    )
+
+    if not st.session_state.setup_complete:
+        st.warning("Run setup first.")
+    else:
+        st.markdown(
+            "We will evaluate the Challenger Model against the Primary Model using:")
+        st.markdown(
+            f"*   **AUC Lift ($\\Delta AUC$)**: The difference in AUC values.")
+        # --- DO NOT REMOVE: formula block from original markdown ---
+        st.markdown(
+            r"""
+$$
+\Delta AUC = AUC_{\text{primary}} - AUC_{\text{challenger}}
+$$
+""")
+        # --- end preserved formula block ---
+        st.markdown(
+            f"where $AUC_{{primary}}$ is the primary model AUC and $AUC_{{challenger}}$ is the challenger model AUC.")
+        st.markdown(
+            "*   **Rank Correlation ($\\rho$)**: Spearman correlation between risk rankings (do they order borrowers similarly?).")
+        # --- DO NOT REMOVE: Spearman formula from original markdown ---
+        st.markdown(
+            r"""
+$$
+\rho = 1 - \frac{6 \sum d_i^2}{n(n^2 - 1)}
+$$
+""")
+        # --- end preserved formula block ---
+        st.markdown(
+            "*   **Risk Tier Agreement**: Percent of applicants assigned to the same risk tier (operational consistency).")
+
+        with st.expander("Tier semantics (make the tiers decision-relevant)", expanded=False):
+            st.info(
+                """
+A tier is only meaningful if it maps to an action. Example mapping (you can adapt):  
+- Tier 0: auto-approve  
+- Tier 1: approve / standard pricing  
+- Tier 2: manual review / tighter terms  
+- Tier 3: decline  
+                """.strip()
+            )
+
+        if st.button("Run benchmark comparison"):
+            primary_auc, primary_f1 = evaluate_model_performance(
+                st.session_state.y_test, st.session_state.primary_probs, threshold=st.session_state.policy_threshold
+            )
+            challenger_auc, challenger_f1 = evaluate_model_performance(
+                st.session_state.y_test, st.session_state.challenger_probs, threshold=st.session_state.policy_threshold
+            )
+
+            auc_lift = float(primary_auc - challenger_auc)
+            rho = float(compute_spearman_rank_correlation(
+                st.session_state.primary_probs, st.session_state.challenger_probs))
+
+            tiers_primary = define_risk_tiers(
+                st.session_state.primary_probs, thresholds=st.session_state.tier_thresholds)
+            tiers_chall = define_risk_tiers(
+                st.session_state.challenger_probs, thresholds=st.session_state.tier_thresholds)
+            tier_agreement = float(np.mean(tiers_primary == tiers_chall))
+
+            bench = {
+                "Primary AUC": float(primary_auc),
+                "Challenger AUC": float(challenger_auc),
+                "AUC Lift (Primary - Challenger)": auc_lift,
+                "Rank Corr (Spearman ρ)": rho,
+                "Tier Agreement": tier_agreement,
+                "Primary F1 (cutoff)": float(primary_f1),
+                "Challenger F1 (cutoff)": float(challenger_f1),
+                "Cutoff used": float(st.session_state.policy_threshold),
+            }
+            st.session_state.benchmark_results = bench
+
+        if st.session_state.benchmark_results is not None:
+            st.subheader("Benchmark Results")
+
+            # Display key metrics in columns
             col1, col2, col3 = st.columns(3)
-            col1.metric("Primary AUC", f"{st.session_state.benchmark_results['primary_auc']:.4f}")
-            col2.metric("Challenger AUC", f"{st.session_state.benchmark_results['challenger_auc']:.4f}")
-            col3.metric("AUC Lift", f"{st.session_state.benchmark_results['auc_lift']:.4f}")
-            
-            st.metric("Spearman Rank Correlation", f"{st.session_state.benchmark_results['rank_corr']:.4f}")
-            st.metric("Risk Tier Agreement", f"{st.session_state.benchmark_results['tier_agreement']:.2%}")
+            with col1:
+                st.metric(
+                    "Primary AUC", f"{st.session_state.benchmark_results['Primary AUC']:.3f}")
+                st.metric(
+                    "Primary F1", f"{st.session_state.benchmark_results['Primary F1 (cutoff)']:.3f}")
+            with col2:
+                st.metric(
+                    "Challenger AUC", f"{st.session_state.benchmark_results['Challenger AUC']:.3f}")
+                st.metric(
+                    "Challenger F1", f"{st.session_state.benchmark_results['Challenger F1 (cutoff)']:.3f}")
+            with col3:
+                st.metric(
+                    "AUC Lift", f"{st.session_state.benchmark_results['AUC Lift (Primary - Challenger)']:.3f}")
+                st.metric(
+                    "Cutoff Used", f"{st.session_state.benchmark_results['Cutoff used']:.2f}")
 
-            st.subheader("Interpretation for Complexity Justification:")
-            if st.session_state.benchmark_results['auc_lift'] < 0.02:
-                st.warning("Low AUC Lift (< 0.02): The complex model adds little predictive value over the simpler challenger.")
-            else:
-                st.success("Significant AUC Lift: The complex model provides a meaningful performance boost.")
-            
-            if st.session_state.benchmark_results['rank_corr'] > 0.9:
-                st.info("High Rank Correlation (> 0.90): Models rank risk very similarly.")
+            # Display comparison metrics in a table
+            comparison_df = pd.DataFrame([
+                {"Metric": "Rank Correlation (Spearman ρ)",
+                 "Value": f"{st.session_state.benchmark_results['Rank Corr (Spearman ρ)']:.3f}"},
+                {"Metric": "Risk Tier Agreement",
+                    "Value": f"{st.session_state.benchmark_results['Tier Agreement']:.1%}"},
+            ])
+            st.dataframe(comparison_df, use_container_width=True,
+                         hide_index=True)
 
-            st.markdown(f"The `challenger_benchmark` function successfully trained a Logistic Regression model as our challenger and compared it against the Primary Model. These insights are crucial for an MRM analyst to advise senior management. If the simple challenger model performs almost as well, the added risk, cost, and opacity of maintaining a complex model might not be worth the marginal gain. This comparison provides solid evidence for challenging the developer's choice of a complex model.")
+            st.markdown("### Decision translation (how to act on these)")
+            auc_lift = st.session_state.benchmark_results["AUC Lift (Primary - Challenger)"]
+            rho = st.session_state.benchmark_results["Rank Corr (Spearman ρ)"]
+            tier_agree = st.session_state.benchmark_results["Tier Agreement"]
+
+            st.write(
+                f"- If **AUC lift** increases, you may justify complexity *if* stability and governance are acceptable.")
+            st.write(
+                f"- If **rank correlation** is very high, the simpler model orders borrowers similarly (complexity may not be worth it).")
+            st.write(f"- If **tier agreement** is low, staffing and outcomes will change materially (manual review queue, decline rates, pricing tiers).")
+
+            # Policy-based interpretation
+            pass_lift = auc_lift >= st.session_state.policy_min_auc_lift
+            pass_rho = rho >= st.session_state.policy_min_rank_corr
+            pass_tier = tier_agree >= st.session_state.policy_min_tier_agree
+
+            st.markdown("### Guardrails (policy-based)")
+            st.write(
+                f"- Minimum AUC lift required: **{st.session_state.policy_min_auc_lift:.3f}** → {'PASS' if pass_lift else 'FAIL'}")
+            st.write(
+                f"- Minimum rank correlation: **{st.session_state.policy_min_rank_corr:.2f}** → {'PASS' if pass_rho else 'FAIL'}")
+            st.write(
+                f"- Minimum tier agreement: **{st.session_state.policy_min_tier_agree:.2f}** → {'PASS' if pass_tier else 'FAIL'}")
+
+            checkpoint(
+                "High AUC lift alone is sufficient to approve a complex model.",
+                ["True", "False"],
+                "False",
+                "Lift is not enough. You also need stability, documentation, explainability, and decision-threshold performance."
+            )
+
+# -----------------------------
+# 4) Prediction Stability Testing
+# -----------------------------
+elif st.session_state.nav == "4) Prediction Stability Testing":
+    st.header(
+        "4) Prediction Stability: Do small input changes create unstable decisions?")
+    st.markdown(
+        """
+**Learning goal:** robustness is a governance requirement.  
+You test whether small, realistic perturbations (data entry, rounding, minor reporting differences) cause **score volatility** or **decision flips**.
+        """.strip()
+    )
+
+    if not st.session_state.setup_complete:
+        st.warning("Run setup first.")
     else:
-        st.warning("Please complete 'Setup & Data Initialization' and 'Result Reproduction' first.")
+        st.markdown(
+            """
+A model can look accurate but behave inconsistently near decision cutoffs.  
+Stability testing estimates how often “small changes” cause different outcomes.
+            """.strip()
+        )
 
-# --- Page: 4. Prediction Stability Testing ---
-elif st.session_state.current_page == "4. Prediction Stability Testing":
-    st.header("5. Step 4: Prediction Stability Testing - Assessing Robustness to Noise")
-    st.markdown(f"A model that performs well on a static test set might still be fragile and unreliable in dynamic real-world scenarios. As an MRM analyst, you must test the Primary Model's **prediction stability** by introducing small, controlled perturbations (noise) to the input features. This simulates slight data entry errors, measurement noise, or minor shifts in feature distributions. A robust model should exhibit minimal changes in predictions, while a fragile model will show significant swings or even classification flips, indicating it might be overfit or overly sensitive to minor input variations. This directly addresses regulatory concerns about model reliability and consistency.")
-    st.markdown(f"We will measure:")
-    st.markdown(f"*   **Mean Absolute Prediction Change**: Average absolute difference in probabilities.")
-    st.markdown(f"*   **Maximum Absolute Prediction Change**: Largest absolute difference.")
-    st.markdown(f"*   **Percentage of Classification Flips**: How often the prediction crosses the decision threshold (e.g., from default to non-default).")
-    st.markdown(f"*   **Rank Correlation (noisy vs. baseline)**: How well the relative risk ordering is maintained.")
-    st.markdown(f"---")
-    st.subheader("Key Insight: Model Stability")
-    st.markdown(f"A model that flips predictions on small input changes is dangerous for deployment. If adding 1% Gaussian noise causes 8% of predictions to flip between \"default\" and \"no default,\" the model's decisions near the threshold are essentially random with respect to measurement precision. Two loan officers entering slightly different values for the same borrower (e.g., income of $75,000 vs. $75,500) would get different approval decisions—a compliance nightmare. Stability testing catches this issue that performance metrics (AUC, F1) cannot detect. For comparison: a logistic regression typically shows <1% flip rate under the same noise, because its linear decision boundary is smooth. This is another reason simpler models are often preferred for regulated applications: they are inherently more stable.")
+        noise_level = st.slider(
+            "Noise level (% of feature standard deviation)",
+            min_value=0.0, max_value=0.10, value=0.01, step=0.005,
+            help="This is a proxy for small measurement noise. In production you would define this based on data quality evidence."
+        )
+        n_trials = st.slider("Number of perturbation trials",
+                             min_value=10, max_value=200, value=50, step=10)
 
-    noise_level = st.slider("Noise Level (% of Feature Std)", 0.001, 0.05, 0.01, 0.001)
-    n_trials = st.slider("Number of Trials", 5, 50, 20, 1)
+        with st.expander("Translate noise into business units (intuition)", expanded=False):
+            st.info(
+                """
+This lab expresses noise as a fraction of feature variability.  
+To make it decision-relevant, translate into units:  
+- If a feature’s std is 15 percentage points, then 1% std ≈ 0.15 percentage points.  
+- If a FICO-like variable had std ≈ 70, then 1% std ≈ 0.7 points.  
+                """.strip()
+            )
 
-    if st.session_state.setup_complete:
-        if st.button("Run Stability Test"):
-            stability_df = stability_test(st.session_state.mock_black_box_model, st.session_state.X_test, noise_level=noise_level, n_trials=n_trials)
-            st.session_state.stability_df = stability_df
+        if st.button("Run stability test"):
+            results = run_stability_test(
+                X_test=st.session_state.X_test,
+                y_test=st.session_state.y_test,
+                base_probs=st.session_state.primary_probs,
+                model=st.session_state.primary_model,
+                noise_level=noise_level,
+                n_trials=n_trials,
+                threshold=st.session_state.policy_threshold,
+            )
+            st.session_state.stability_results = results
 
-        if not st.session_state.stability_df.empty:
-            st.subheader("Prediction Stability Test Results:")
-            st.dataframe(st.session_state.stability_df.describe())
-            
-            avg_flip_rate = st.session_state.stability_df['pct_flipped'].mean()
-            st.metric("Average % Classification Flips", f"{avg_flip_rate:.2%}")
+        if st.session_state.stability_results is not None:
+            st.subheader("Stability summary")
+            st.dataframe(st.session_state.stability_results["trial_metrics"].describe(
+            ), use_container_width=True)
 
-            if avg_flip_rate > 0.05:
-                st.error("FLAG: Model is UNSTABLE (> 5% flips with small noise).")
-            else:
-                st.success("PASS: Predictions are stable under noise.")
+            flip_rate = float(st.session_state.stability_results["flip_rate"])
+            st.metric("Decision flip rate", f"{flip_rate*100:.2f}%")
 
-            st.markdown(f"The `stability_test` function introduced small Gaussian noise proportional to feature standard deviation across multiple trials (`n_trials={n_trials}`) to the `X_test` data and observed the resulting changes in the Primary Model's predictions. The output shows key metrics like mean/max absolute prediction change and average percentage of predictions flipped. For an MRM analyst, an unstable model is a clear warning sign. Even if its overall performance metrics (AUC, F1) are good, its fragility makes it unreliable for deployment. This would be a critical finding in the validation report, potentially leading to a \"Reject\" recommendation until the instability is addressed.")
+            st.caption(
+                "Decision translation: Higher flip rate means inconsistent underwriting/pricing around the cutoff, increasing operational and compliance risk."
+            )
+
+            st.markdown("### Guardrails (policy-based)")
+            st.write(
+                f"Maximum flip rate allowed: **{st.session_state.policy_max_flip_rate:.2%}** → {'PASS' if flip_rate <= st.session_state.policy_max_flip_rate else 'FAIL'}")
+
+            checkpoint(
+                "Which borrowers typically drive flip-rate risk?",
+                ["Far from the cutoff", "Near the cutoff",
+                    "Only the highest PD tail"],
+                "Near the cutoff",
+                "Small perturbations matter most where the score is close to the decision rule boundary."
+            )
+
+# -----------------------------
+# 5) Complexity Justification
+# -----------------------------
+elif st.session_state.nav == "5) Complexity Justification":
+    st.header(
+        "5) Complexity Justification: Is complexity worth the governance burden?")
+    st.markdown(
+        """
+**Learning goal:** synthesize evidence into an audit-defensible judgment.  
+Complexity is justified only if incremental value is material **and** governance risks are controlled.
+        """.strip()
+    )
+
+    if not st.session_state.setup_complete:
+        st.warning("Run setup first.")
     else:
-        st.warning("Please complete 'Setup & Data Initialization' first.")
+        if st.session_state.benchmark_results is None or st.session_state.stability_results is None:
+            st.warning(
+                "Complete benchmarking and stability sections first (evidence needed).")
+        else:
+            # Criteria evaluation (policy-based)
+            auc_lift = float(
+                st.session_state.benchmark_results["AUC Lift (Primary - Challenger)"])
+            rho = float(
+                st.session_state.benchmark_results["Rank Corr (Spearman ρ)"])
+            tier_agree = float(
+                st.session_state.benchmark_results["Tier Agreement"])
+            flip_rate = float(st.session_state.stability_results["flip_rate"])
 
-# --- Page: 5. Complexity Justification ---
-elif st.session_state.current_page == "5. Complexity Justification":
-    st.header("6. Step 5: Complexity Justification Assessment - Weighing Performance vs. Risk")
-    st.markdown(f"Now, as the MRM analyst, you need to synthesize all findings from documentation, reproduction, benchmarking, and stability testing. The core question is: is the Primary Model's inherent complexity and opacity (being a black box) truly justified by its performance gains and robustness, considering the business context? This step moves beyond individual metric checks to a holistic risk assessment, a crucial part of SR 11-7's \"effective challenge\" framework. This assessment requires a structured scoring framework, combining quantitative and qualitative factors.")
-    st.markdown(f"We will evaluate the model against five criteria:")
-    st.markdown(f"1.  **AUC Lift**: Is the performance gain significant over a simpler model?")
-    st.markdown(f"2.  **Rank Correlation**: Does the model agree with a simpler model on risk ordering?")
-    st.markdown(f"3.  **Prediction Stability**: Is the model robust to noise?")
-    st.markdown(f"4.  **Business Impact**: Does the scale of the business use (e.g., large portfolio size) warrant potentially higher precision from a complex model?")
-    st.markdown(f"5.  **Explainability Tools**: Are tools like SHAP available to mitigate opacity?")
-    st.markdown(f"Each criterion will contribute to an overall score, leading to a preliminary assessment of \"Complexity Justified,\" \"Conditionally Justified,\" or \"Not Justified.\"")
+            # Materiality lens (simple lab heuristic)
+            business_material = st.session_state.portfolio_size_mm >= 100
 
-    if st.session_state.setup_complete and st.session_state.benchmark_results and not st.session_state.stability_df.empty:
-        if st.button("Assess Complexity Justification"):
-            cx_score, cx_rec, cx_findings = complexity_assessment(st.session_state.benchmark_results, st.session_state.stability_df, st.session_state.business_context)
-            st.session_state.cx_score = cx_score
-            st.session_state.cx_rec = cx_rec
-            st.session_state.cx_findings = cx_findings
+            # Transparency: in this lab, treat as missing unless explicitly documented
+            has_explainability_plan = any(
+                "explainability" in s.lower() for s in st.session_state.doc_issues)
 
-        if st.session_state.cx_rec != "Not Assessed":
-            st.subheader("Complexity Justification Assessment Results:")
-            st.markdown(f"Overall Score: **{st.session_state.cx_score}/5**")
-            st.markdown(f"**Recommendation: {st.session_state.cx_rec}**")
-            st.markdown("Findings:")
-            for finding in st.session_state.cx_findings:
-                st.markdown(f"* {finding}")
-            
-            st.markdown(f"The `complexity_assessment` function has provided a structured evaluation of whether the Primary Model's complexity is justified. Each of the five criteria (AUC Lift, Rank Correlation, Stability, Business Impact, Explainability) has been assessed, contributing to an `overall score`. The `recommendation` provides a clear, high-level summary for senior management. For an MRM analyst, this step is vital for translating technical findings into actionable business insights. If the complexity is not justified, it strongly suggests either simplifying the model or requiring significant improvements and risk mitigations (like better explainability) before approval. The `findings` list provides specific reasons for the recommendation.")
+            # Scorecard
+            findings = []
+
+            perf_ok = auc_lift >= st.session_state.policy_min_auc_lift
+            findings.append(("Performance lift", "PASS" if perf_ok else "FAIL",
+                            f"AUC lift={auc_lift:.3f} vs policy min {st.session_state.policy_min_auc_lift:.3f}"))
+
+            agreement_ok = (rho >= st.session_state.policy_min_rank_corr) and (
+                tier_agree >= st.session_state.policy_min_tier_agree)
+            findings.append(("Operational consistency", "PASS" if agreement_ok else "NOTE",
+                            f"ρ={rho:.2f}, tier agreement={tier_agree:.2%}"))
+
+            stability_ok = flip_rate <= st.session_state.policy_max_flip_rate
+            findings.append(("Stability near cutoff", "PASS" if stability_ok else "FAIL",
+                            f"Flip rate={flip_rate:.2%} vs max {st.session_state.policy_max_flip_rate:.2%}"))
+
+            business_ok = business_material
+            findings.append(("Business materiality", "PASS" if business_ok else "NOTE",
+                            f"Portfolio={st.session_state.portfolio_size_mm}mm (lab lens)"))
+
+            explain_ok = not has_explainability_plan  # doc issue exists means missing
+            findings.append(("Explainability governance", "FAIL" if not explain_ok else "PASS",
+                            "Explainability strategy must be documented and governed."))
+
+            score = sum(1 for _, status, _ in findings if status == "PASS")
+
+            recommendation = "Conditionally Approved"
+            if any(status == "FAIL" for _, status, _ in findings):
+                recommendation = "Rejected (governance risk not controlled)"
+            elif score >= 4:
+                recommendation = "Approved (subject to standard monitoring)"
+
+            st.session_state.complexity_assessment = {
+                "score_pass_count": score,
+                "recommendation": recommendation,
+                "findings": findings,
+            }
+
+            st.subheader("Complexity scorecard (evidence-based)")
+            df = pd.DataFrame(findings, columns=[
+                              "Criterion", "Status", "Evidence / Rationale"])
+            st.dataframe(df, use_container_width=True)
+
+            st.markdown("### Decision translation")
+            st.write("- If the model is **Rejected**, reduce complexity or bring additional evidence (stability, documentation, explainability, subgroup testing).")
+            st.write(
+                "- If **Conditionally Approved**, you may use it only under explicit conditions and monitoring until gaps are remediated.")
+            st.write(
+                "- If **Approved**, proceed with monitoring and periodic revalidation according to policy.")
+
+            checkpoint(
+                "A 'conditional approval' means the model is safe to use without changes.",
+                ["True", "False"],
+                "False",
+                "Conditional approval means the model can be used only if specific remediation and monitoring conditions are met."
+            )
+
+# -----------------------------
+# 6) Formal Validation Report
+# -----------------------------
+elif st.session_state.nav == "6) Formal Validation Report":
+    st.header("6) Formal Validation Report: audit-ready decision package")
+    st.markdown(
+        """
+**Learning goal:** translate analysis into an audit artifact: section statuses, findings, conditions, and recommendation.  
+Every number must have a traceable definition and assumption.
+        """.strip()
+    )
+
+    if not st.session_state.setup_complete:
+        st.warning("Run setup first.")
     else:
-        st.warning("Please complete 'Setup & Data Initialization', 'Challenger Benchmarking', and 'Prediction Stability Testing' first.")
+        if st.session_state.complexity_assessment is None:
+            st.warning("Complete complexity justification first.")
+        else:
+            if st.button("Generate formal validation report"):
+                # Build a structured report from existing artifacts
+                report = {
+                    "Model": "Credit Default PD (Primary)",
+                    "Use": "Underwriting + pricing tiering",
+                    "Cutoff used (for F1 / decisions)": float(st.session_state.policy_threshold),
+                    "Tier thresholds": st.session_state.tier_thresholds,
+                    "Policy profile": st.session_state.policy_profile,
+                    "Sections": {
+                        "Documentation Review (Gate 1)": "Completed",
+                        "Result Reproduction (Gate 2)": "Completed" if st.session_state.repro_results is not None else "Not run",
+                        "Challenger Benchmarking": "Completed" if st.session_state.benchmark_results is not None else "Not run",
+                        "Stability Testing": "Completed" if st.session_state.stability_results is not None else "Not run",
+                        "Complexity Justification": "Completed",
+                    },
+                    "Key findings": st.session_state.complexity_assessment["findings"],
+                    "Recommendation": st.session_state.complexity_assessment["recommendation"],
+                    "Conditions (if conditional)": [
+                        "Provide documented explainability strategy (what is produced, how it is governed).",
+                        "Add subgroup / fair lending evidence consistent with policy.",
+                        "Implement monitoring with explicit triggers (PD drift, approval rate shift, tier migration).",
+                    ],
+                    "Not covered in this lab (would be required in production)": [
+                        "Fair lending / disparate impact testing on protected classes (policy-aligned).",
+                        "Out-of-time stress testing and macro sensitivity analysis.",
+                        "Data lineage and full production control testing.",
+                    ],
+                }
+                st.session_state.validation_report = report
 
-# --- Page: 6. Formal Validation Report ---
-elif st.session_state.current_page == "6. Formal Validation Report":
-    st.header("7. Step 6: Formal Model Validation Report - The Final Verdict")
-    st.markdown(f"The culmination of your independent validation efforts as an MRM analyst is the **Formal Model Validation Report**. This comprehensive document synthesizes all findings, categorizes issues by severity, outlines conditions for approval, and provides a definitive recommendation: \"Approve,\" \"Conditional Approve,\" or \"Reject.\" This report is the primary deliverable for risk committees, regulators, and senior management, embodying the \"effective challenge\" principle and ensuring transparency and accountability in model governance. It provides a clear roadmap for model deployment or necessary remediation.")
-    st.markdown(f"---")
-    st.subheader("Three-Level Validation Recommendation:")
-    st.markdown(f"*   **APPROVED**: All sections pass. Model is fit for intended purpose with standard monitoring.")
-    st.markdown(f"*   **CONDITIONALLY APPROVED**: 1 non-critical finding. Model may be deployed subject to specific conditions being met within a defined timeframe (e.g., \"address documentation gaps within 60 days\").")
-    st.markdown(f"*   **REJECTED**: $\geq 2$ critical findings, or 1 fatal finding (e.g., results cannot be reproduced). Model must not be deployed until issues are resolved and revalidation occurs.")
-    st.markdown(f"**Critical Findings**: Result non-reproducibility, prediction instability ($>5\%$ flip rate), AUC below minimum threshold, or documented bias.")
-    st.markdown(f"**Non-critical Findings**: Documentation gaps, marginal complexity justification, limited stress test coverage. These can be addressed as conditions for approval.")
+            if st.session_state.validation_report is not None:
+                st.subheader("Executive summary")
 
-    if st.session_state.setup_complete and st.session_state.cx_rec != "Not Assessed":
-        if st.button("Generate Formal Report"):
-            final_validation_report = compile_validation_report(st.session_state.doc_issues, st.session_state.repro_pass, st.session_state.benchmark_results, st.session_state.stability_df, st.session_state.cx_rec, st.session_state.cx_findings, st.session_state.model_documentation, st.session_state.business_context)
-            st.session_state.final_validation_report = final_validation_report
+                report = st.session_state.validation_report
 
-        if st.session_state.final_validation_report:
-            report = st.session_state.final_validation_report
-            st.subheader("Formal Model Validation Report:")
-            st.markdown(f"**Model:** {report['model_name']}")
-            st.markdown(f"**Validator:** {report['validator']}")
-            st.markdown(f"**Date:** {pd.to_datetime(report['validation_date']).strftime('%Y-%m-%d %H:%M:%S')}")
-            st.markdown(f"\n## OVERALL RECOMMENDATION: {report['overall_recommendation']}\n")
-            
-            st.markdown("### Section 1: Documentation Review")
-            st.write(report['section_1_documentation'])
-            st.markdown("### Section 2: Result Reproduction")
-            st.write(report['section_2_reproduction'])
-            st.markdown("### Section 3: Benchmarking")
-            st.write(report['section_3_benchmarking'])
-            st.markdown("### Section 4: Stability")
-            st.write(report['section_4_stability'])
-            st.markdown("### Section 5: Complexity Justification")
-            st.write(report['section_5_complexity'])
-            
-            if report.get('conditions_for_approval'):
-                st.markdown("\n**CONDITIONS FOR APPROVAL:**")
-                for cond in report['conditions_for_approval']:
-                    st.markdown(f"* {cond}")
-            
-            st.markdown("\n**SIGN-OFFS:**")
-            st.write(report['sign_offs'])
+                # Model Information
+                st.markdown("#### Model Information")
+                info_col1, info_col2 = st.columns(2)
+                with info_col1:
+                    st.write(f"**Model:** {report['Model']}")
+                    st.write(f"**Use:** {report['Use']}")
+                with info_col2:
+                    st.write(
+                        f"**Decision Cutoff:** {report['Cutoff used (for F1 / decisions)']:.2f}")
+                    st.write(f"**Policy Profile:** {report['Policy profile']}")
 
-            st.markdown(f"The `compile_validation_report` function has generated the final, comprehensive Model Validation Report. It aggregates all findings from the preceding steps—documentation review, performance reproduction, challenger benchmarking, stability testing, and complexity justification—to formulate a holistic assessment. This report serves as the official record of the independent challenge process. For an MRM analyst, this deliverable is fundamental for transparent model governance, informing strategic decisions about model deployment, and ensuring regulatory compliance. The \"effective challenge\" has been successfully documented, providing a clear path forward for the Primary Model.")
+                # Section Status
+                st.markdown("#### Validation Sections Status")
+                sections_df = pd.DataFrame([
+                    {"Section": k, "Status": v}
+                    for k, v in report['Sections'].items()
+                ])
+                st.dataframe(
+                    sections_df, use_container_width=True, hide_index=True)
+
+                # Key Findings
+                st.markdown("#### Key Findings")
+                findings_df = pd.DataFrame(
+                    report['Key findings'],
+                    columns=["Criterion", "Status", "Evidence / Rationale"]
+                )
+                st.dataframe(
+                    findings_df, use_container_width=True, hide_index=True)
+
+                # Recommendation
+                st.markdown("#### Recommendation")
+                if "Rejected" in report['Recommendation']:
+                    st.error(f"🚫 {report['Recommendation']}")
+                elif "Conditionally" in report['Recommendation']:
+                    st.warning(f"⚠️ {report['Recommendation']}")
+                else:
+                    st.success(f"✅ {report['Recommendation']}")
+
+                # Conditions
+                st.markdown("#### Conditions (if conditional)")
+                for condition in report['Conditions (if conditional)']:
+                    st.write(f"- {condition}")
+
+                # Limitations
+                with st.expander("Not covered in this lab (would be required in production)"):
+                    for item in report['Not covered in this lab (would be required in production)']:
+                        st.write(f"- {item}")
+
+                st.markdown("### Guardrails against misinterpretation")
+                st.warning(
+                    """
+- Do not interpret AUC as a deployment decision by itself. Tie outcomes to underwriting cutoffs and tier actions.
+- Treat all cutoffs as **policy choices**; document why a threshold exists and what changes when it moves.
+- Ensure every claim has an evidence artifact: metric definition, dataset version, score file version, and assumptions.
+                    """.strip()
+                )
+
+# -----------------------------
+# Visualizations
+# -----------------------------
+elif st.session_state.nav == "Visualizations":
+    st.header("Visualizations: communicate governance evidence")
+    st.markdown(
+        """
+**Learning goal:** each plot must answer a specific validation question and include a decision translation.  
+Use charts to reduce ambiguity, not to decorate results.
+        """.strip()
+    )
+
+    if not st.session_state.setup_complete:
+        st.warning("Run setup first.")
     else:
-        st.warning("Please complete 'Setup & Data Initialization' and 'Complexity Justification Assessment' first.")
+        if st.session_state.benchmark_results is None:
+            st.info("Run benchmarking to populate comparison visuals.")
+        if st.session_state.stability_results is None:
+            st.info("Run stability test to populate stability visuals.")
 
-# --- Page: Visualizations ---
-elif st.session_state.current_page == "Visualizations":
-    st.header("Visualizations")
-    st.markdown(f"To support the formal validation report, a set of visualizations further illustrates the key findings. These plots provide a clear, intuitive understanding of the model's performance, behavior, and comparison against the challenger.")
-    st.markdown(f"As an MRM analyst, visualizations are powerful tools for communicating complex model validation findings to non-technical stakeholders (e.g., risk committees, business owners). They succinctly highlight performance differences, areas of agreement/disagreement, and stability issues, adding visual evidence to the quantitative analysis in the formal report.")
+        # ROC overlay
+        st.subheader("ROC comparison (ranking power)")
+        st.caption(
+            "How to read: higher curve/AUC = better discrimination. Decision translation: tiny lifts may not justify complexity.")
+        from sklearn.metrics import roc_curve, auc
 
-    if (st.session_state.setup_complete and 
-        st.session_state.reproduced_metrics and 
-        st.session_state.benchmark_results and 
-        not st.session_state.stability_df.empty and 
-        st.session_state.cx_rec != "Not Assessed"):
-        
-        # V1: ROC Curves Overlay
-        st.markdown(f"**1. ROC Curves Overlay: Primary vs. Challenger**")
-        st.markdown(f"Shows the trade-off between True Positive Rate and False Positive Rate. An overlay visually compares the discriminatory power of both models. Higher AUC means better separation of classes.")
-        
-        fig1, ax1 = plt.subplots(figsize=(10, 6))
-        # Primary Model
-        fpr_prim, tpr_prim, _ = roc_curve(st.session_state.y_test, st.session_state.primary_probs)
-        roc_auc_prim = auc(fpr_prim, tpr_prim)
-        ax1.plot(fpr_prim, tpr_prim, color='darkorange', lw=2, label=f'Primary Model (AUC = {roc_auc_prim:.2f})')
-        
-        # Challenger Model
-        X_test_scaled = st.session_state.challenger_scaler.transform(st.session_state.X_test)
-        challenger_probs = st.session_state.challenger_model.predict_proba(X_test_scaled)[:, 1]
-        fpr_chal, tpr_chal, _ = roc_curve(st.session_state.y_test, challenger_probs)
-        roc_auc_chal = auc(fpr_chal, tpr_chal)
-        ax1.plot(fpr_chal, tpr_chal, color='navy', lw=2, linestyle='--', label=f'Challenger Model (AUC = {roc_auc_chal:.2f})')
-        
-        ax1.plot([0, 1], [0, 1], color='gray', lw=1, linestyle='--')
-        ax1.set_xlim([0.0, 1.0])
-        ax1.set_ylim([0.0, 1.05])
-        ax1.set_xlabel('False Positive Rate')
-        ax1.set_ylabel('True Positive Rate')
-        ax1.set_title('ROC Curve Comparison')
-        ax1.legend(loc="lower right")
-        st.pyplot(fig1)
+        fpr_p, tpr_p, _ = roc_curve(
+            st.session_state.y_test, st.session_state.primary_probs)
+        fpr_c, tpr_c, _ = roc_curve(
+            st.session_state.y_test, st.session_state.challenger_probs)
+        auc_p = auc(fpr_p, tpr_p)
+        auc_c = auc(fpr_c, tpr_c)
 
-        # V2: Prediction Rank Scatter Plot
-        st.markdown(f"**2. Prediction Rank Scatter Plot**")
-        st.markdown(f"Plots the Primary Model's probabilities against the Challenger Model's probabilities. A tight cluster indicates high agreement on risk ranking; a dispersed plot shows disagreement.")
-        fig2, ax2 = plt.subplots(figsize=(8, 8))
-        ax2.scatter(st.session_state.primary_probs, challenger_probs, alpha=0.1, color='purple')
-        ax2.plot([0, 1], [0, 1], 'r--')
-        ax2.set_xlabel('Primary Model Probabilities')
-        ax2.set_ylabel('Challenger Model Probabilities')
-        ax2.set_title('Prediction Rank Agreement')
-        st.pyplot(fig2)
+        fig, ax = plt.subplots()
+        ax.plot(fpr_p, tpr_p, label=f"Primary (AUC={auc_p:.3f})")
+        ax.plot(fpr_c, tpr_c, label=f"Challenger (AUC={auc_c:.3f})")
+        ax.plot([0, 1], [0, 1], linestyle="--")
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.legend()
+        st.pyplot(fig, clear_figure=True)
 
-        # V3: Risk Tier Confusion Matrix
-        st.markdown(f"**3. Risk Tier Confusion Matrix**")
-        st.markdown(f"Illustrates how well the Primary Model's risk tiers align with the Challenger Model's tiers. This is critical for understanding operational consistency.")
-        prim_tiers = define_risk_tiers(st.session_state.primary_probs)
-        chal_tiers = define_risk_tiers(challenger_probs)
-        cm = confusion_matrix(prim_tiers, chal_tiers)
-        fig3, ax3 = plt.subplots(figsize=(8, 6))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax3)
-        ax3.set_xlabel('Challenger Tiers')
-        ax3.set_ylabel('Primary Tiers')
-        ax3.set_title('Risk Tier Confusion Matrix')
-        st.pyplot(fig3)
+        # Probability scatter
+        st.subheader("Score agreement: Primary vs Challenger (scatter)")
+        st.caption(
+            "How to read: tight diagonal = similar scoring. Decision translation: dispersion implies different ordering/segmentation.")
+        fig2, ax2 = plt.subplots()
+        ax2.scatter(st.session_state.primary_probs,
+                    st.session_state.challenger_probs, alpha=0.35)
+        ax2.set_xlabel("Primary PD")
+        ax2.set_ylabel("Challenger PD")
+        st.pyplot(fig2, clear_figure=True)
 
-        # V4: Prediction Stability Box Plots
-        st.markdown(f"**4. Prediction Stability Box Plots**")
-        st.markdown(f"Visualizes the distribution of prediction changes across noise trials. Wide box plots or many outliers indicate instability.")
-        fig4, ax4 = plt.subplots(figsize=(10, 6))
-        sns.boxplot(y=st.session_state.stability_df['abs_diff'], ax=ax4)
-        ax4.set_title('Distribution of Absolute Prediction Changes under Noise')
-        ax4.set_ylabel('Absolute Probability Difference')
-        st.pyplot(fig4)
+        # Tier confusion matrix
+        st.subheader("Risk tier agreement (operational buckets)")
+        st.caption(
+            "How to read: off-diagonal mass = different tier actions (approve/review/decline).")
+        tiers_p = define_risk_tiers(
+            st.session_state.primary_probs, thresholds=st.session_state.tier_thresholds)
+        tiers_c = define_risk_tiers(
+            st.session_state.challenger_probs, thresholds=st.session_state.tier_thresholds)
+        cm = pd.crosstab(tiers_p, tiers_c, rownames=[
+                         "Primary tier"], colnames=["Challenger tier"])
+        st.dataframe(cm, use_container_width=True)
 
-        # V5: Complexity Justification Scorecard
-        st.markdown(f"**5. Complexity Justification Scorecard**")
-        st.markdown(f"A visual summary of the 5-criteria assessment with pass/fail for each and overall recommendation.")
-        fig5, ax5 = plt.subplots(figsize=(6, 4))
-        ax5.axis('off')
-        # Simple text based visualization for the scorecard
-        score_text = f"Overall Score: {st.session_state.cx_score}/5\nRecommendation: {st.session_state.cx_rec}"
-        ax5.text(0.5, 0.5, score_text, ha='center', va='center', fontsize=16, 
-                 bbox=dict(facecolor='lightgreen' if st.session_state.cx_rec != 'Not Justified' else 'salmon', alpha=0.5))
-        st.pyplot(fig5)
-        
-        st.markdown(f"These visualizations provide critical graphical insights for the MRM analyst and other stakeholders: The **ROC Curves Overlay** clearly shows the performance difference (or lack thereof) between the Primary and Challenger models. The **Prediction Rank Scatter Plot** quickly reveals whether the models generally agree on who the highest-risk applicants are. The **Risk Tier Confusion Matrix** is invaluable for operational teams, showing where models agree and disagree on concrete business actions. The **Prediction Stability Box Plot** graphically demonstrates the model's robustness. The **Complexity Justification Scorecard** offers an immediate, color-coded summary of the model's strengths and weaknesses across key validation criteria, making the final recommendation transparent and easy to grasp. Together, these visualizations complement the detailed report, ensuring that the \"effective challenge\" is not only robustly performed but also clearly communicated across Prudent Financial Corp.")
-
-    else:
-        st.warning("Please complete all preceding validation steps to generate visualizations.")
+        # Stability chart (if available)
+        if st.session_state.stability_results is not None:
+            st.subheader(
+                "Stability distribution (trial-level score perturbation)")
+            st.caption(
+                "How to read: wider distribution/outliers = instability. Decision translation: instability near cutoffs increases governance risk.")
+            trial_df = st.session_state.stability_results["trial_metrics"]
+            fig3, ax3 = plt.subplots()
+            ax3.boxplot(trial_df["mean_abs_diff"].values)
+            ax3.set_ylabel("Mean absolute PD change (trial)")
+            st.pyplot(fig3, clear_figure=True)
 
 
 # License
